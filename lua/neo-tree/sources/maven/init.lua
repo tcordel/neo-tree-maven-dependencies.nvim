@@ -55,7 +55,7 @@ local explore_jar = function(group_id, artifact_id, version)
 		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s", jar_javadoc:gsub("/", "%%5C/"))
 	end
 
-	local cmd = "unzip -l " .. jar .. " | awk '{print $4}' "
+	local cmd = "unzip -l " .. jar .. " | tail -n +4 | head -n -2 | awk '{print $4}' "
 	local content = vim.fn.system(cmd)
 
 	for _, class in pairs(vim.split(content, "\n")) do
