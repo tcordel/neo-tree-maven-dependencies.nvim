@@ -55,7 +55,7 @@ local explore_jar = function(group_id, artifact_id, version)
 		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s", jar_javadoc:gsub("/", "%%5C/"))
 	end
 
-	local cmd = "unzip -l " .. jar .. " | tail -n +4 | head -n -2 | awk '{print $4}' "
+	local cmd = "unzip -l " .. jar .. " | tail -n +4 | head -n -2 | awk '{for (i=4; i<=NF; i++) { printf(\"%s%s\",( (i>4) ? \" \" : \"\" ), $i) } print \"\"}' "
 	local content = vim.fn.system(cmd)
 
 	for _, class in pairs(vim.split(content, "\n")) do
@@ -227,7 +227,6 @@ M.load_dependencies = function()
 	local items = {}
 	for line in lines do
 		if line ~= "" then
-			vim.notify("line : " .. line, vim.log.levels.INFO)
 			line = string.gsub(line, "%s*", "")
 			local split = vim.split(line, ":")
 			local group_id = split[1]
