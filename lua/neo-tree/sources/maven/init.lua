@@ -2,6 +2,7 @@ local Path = require("plenary.path")
 local M = {
 	name = "maven",
 }
+local resource_file_prefix = "jar://"
 
 local extract_metadata_from_uri = function(class)
 	local packageName = ""
@@ -80,7 +81,7 @@ local explore_jar = function(group_id, artifact_id, version)
 						className
 					)
 				else
-					name = jar .. "::" .. class
+					name = resource_file_prefix .. jar .. "::" .. class
 				end
 				local resource = {
 					id = name,
@@ -88,10 +89,6 @@ local explore_jar = function(group_id, artifact_id, version)
 					path = name,
 					type = "file",
 					stat_provider = "maven-custom",
-					extra = {
-						jar = jar,
-						file = class,
-					},
 				}
 				local parent = dependency
 				for _, token in pairs(packageTokens) do
@@ -149,6 +146,30 @@ local register = function()
 	local items_data = deps:read()
 	return vim.json.decode(items_data)
 end
+local open_jar_resource = function(jar_resource)
+	local buf = vim.api.nvim_get_current_buf()
+	local address = string.sub(jar_resource, #resource_file_prefix)
+	local tokens = vim.split(address, "::")
+	local jar = tokens[1]
+	local resource = tokens[2]
+	vim.bo[buf].modifiable = true
+	vim.bo[buf].swapfile = false
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].filetype = "java"
+
+	local content = vim.fn.system("unzip -p " .. jar .. " " .. resource .. " | less")
+	if not content then
+		vim.notify("Impossible de lire " .. resource .. " depuis " .. jar, vim.log.levels.ERROR)
+		return
+	end
+
+	-- charger les lignes
+    local normalized = string.gsub(content, '\r\n', '\n')
+    local source_lines = vim.split(normalized, "\n", { plain = true })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, source_lines)
+	vim.bo[buf].modifiable = false
+	vim.bo[buf].readonly = true
+end
 
 M.setup = function()
 	M.config = {
@@ -168,6 +189,16 @@ M.setup = function()
 			M.load_dependencies()
 		end, {})
 	end
+
+	local group = vim.api.nvim_create_augroup("maven", {})
+	vim.api.nvim_create_autocmd("BufReadCmd", {
+		group = group,
+		pattern = resource_file_prefix .. "*",
+		---@param args vim.api.keyset.create_autocmd.callback_args
+		callback = function(args)
+			open_jar_resource(args.match)
+		end,
+	})
 end
 
 M.load_dependencies = function()
