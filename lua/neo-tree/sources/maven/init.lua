@@ -164,8 +164,8 @@ local open_jar_resource = function(jar_resource)
 	end
 
 	-- charger les lignes
-    local normalized = string.gsub(content, '\r\n', '\n')
-    local source_lines = vim.split(normalized, "\n", { plain = true })
+	local normalized = string.gsub(content, "\r\n", "\n")
+	local source_lines = vim.split(normalized, "\n", { plain = true })
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, source_lines)
 	vim.bo[buf].modifiable = false
 	vim.bo[buf].readonly = true
@@ -208,14 +208,20 @@ M.load_dependencies = function()
 		"cd "
 			.. M.config.root_dir
 			.. " && mvn -o dependency:list -DincludeScope=compile -Dsort -DoutputFile="
+			.. temp_file .. ".2"
+			.. " && tail -n +3 "
+			.. temp_file .. ".2"
+			.. " | uniq | sort > "
 			.. temp_file
 	)
+	vim.fn.delete(temp_file .. ".2")
 
 	local f = assert(io.open(temp_file, "rb"))
 	local lines = f:lines()
 	local items = {}
 	for line in lines do
-		if string.find(line, "") then
+		if line ~= "" then
+			vim.notify("line : " .. line, vim.log.levels.INFO)
 			line = string.gsub(line, "%s*", "")
 			local split = vim.split(line, ":")
 			local group_id = split[1]
