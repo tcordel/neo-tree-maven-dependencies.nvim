@@ -64,8 +64,10 @@ local explore_jar = function(group_id, artifact_id, version)
 
 			if className ~= nil and className ~= "" then
 				local name
+				local filter = false
 				-- jdt://contents/classmate-1.7.0.jar/com.fasterxml.classmate/TypeBindings.class?=demo/%5C/home%5C/tib%5C/.m2%5C/repository%5C/com%5C/fasterxml%5C/classmate%5C/1.7.0%5C/classmate-1.7.0.jar=/maven.pomderived=/true=/=/javadoc_location=/jar:file:%5C/home%5C/tib%5C/.m2%5C/repository%5C/com%5C/fasterxml%5C/classmate%5C/1.7.0%5C/classmate-1.7.0-javadoc.jar%5C!%5C/=/=/maven.groupId=/com.fasterxml=/=/maven.artifactId=/classmate=/=/maven.version=/1.7.0=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%3Ccom.fasterxml.classmate(TypeBindings.class
 				if ends_with(className, ".class") then
+					filter = string.find(className, "%$") ~= nil
 					name = string.format(
 						"jdt://contents/%s-%s.jar/%s/%s?=demo/%s=/maven.pomderived=/true%s%%5C!%%5C/=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s(%s",
 						artifact_id,
@@ -83,34 +85,36 @@ local explore_jar = function(group_id, artifact_id, version)
 				else
 					name = resource_file_prefix .. jar .. "::" .. class
 				end
-				local resource = {
-					id = name,
-					name = className,
-					path = name,
-					type = "file",
-					stat_provider = "maven-custom",
-				}
-				local parent = dependency
-				for _, token in pairs(packageTokens) do
-					local selected = nil
-					for _, directory in pairs(parent.children) do
-						if directory.name == token then
-							selected = directory
+				if not filter then
+					local resource = {
+						id = name,
+						name = className,
+						path = name,
+						type = "file",
+						stat_provider = "maven-custom",
+					}
+					local parent = dependency
+					for _, token in pairs(packageTokens) do
+						local selected = nil
+						for _, directory in pairs(parent.children) do
+							if directory.name == token then
+								selected = directory
+							end
 						end
-					end
-					if selected == nil then
-						selected = {
-							id = parent.id .. "." .. token,
-							name = token,
-							type = "directory",
-							children = {},
-						}
-						table.insert(parent.children, selected)
-					end
+						if selected == nil then
+							selected = {
+								id = parent.id .. "." .. token,
+								name = token,
+								type = "directory",
+								children = {},
+							}
+							table.insert(parent.children, selected)
+						end
 
-					parent = selected
+						parent = selected
+					end
+					table.insert(parent.children, resource)
 				end
-				table.insert(parent.children, resource)
 			end
 		end
 	end
@@ -208,9 +212,11 @@ M.load_dependencies = function()
 		"cd "
 			.. M.config.root_dir
 			.. " && mvn -o dependency:list -DincludeScope=compile -Dsort -DoutputFile="
-			.. temp_file .. ".2"
+			.. temp_file
+			.. ".2"
 			.. " && tail -n +3 "
-			.. temp_file .. ".2"
+			.. temp_file
+			.. ".2"
 			.. " | uniq | sort > "
 			.. temp_file
 	)
