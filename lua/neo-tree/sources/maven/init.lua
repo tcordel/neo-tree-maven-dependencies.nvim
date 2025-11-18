@@ -4,6 +4,117 @@ local M = {
 }
 local resource_file_prefix = "jar://"
 
+local register = function()
+	if M.config.enabled == false then
+		return {}
+	end
+	local deps = Path:new(M.config.maven_dependencies)
+	if not deps:exists() then
+		M.load_dependencies()
+	end
+	local items_data = deps:read()
+	return vim.json.decode(items_data)
+end
+local open_jar_resource = function(jar_resource)
+	local buf = vim.api.nvim_get_current_buf()
+	local address = string.sub(jar_resource, #resource_file_prefix)
+	local tokens = vim.split(address, "::")
+	local jar = tokens[1]
+	local resource = tokens[2]
+	vim.bo[buf].modifiable = true
+	vim.bo[buf].swapfile = false
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].filetype = "java"
+
+	local content = vim.fn.system("unzip -p " .. jar .. " " .. resource .. " | less")
+	if not content then
+		vim.notify("Impossible de lire " .. resource .. " depuis " .. jar, vim.log.levels.ERROR)
+		return
+	end
+
+	-- charger les lignes
+	local normalized = string.gsub(content, "\r\n", "\n")
+	local source_lines = vim.split(normalized, "\n", { plain = true })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, source_lines)
+	vim.bo[buf].modifiable = false
+	vim.bo[buf].readonly = true
+end
+
+M.setup = function()
+	M.config = {
+		enabled = false,
+	}
+	local root_dir = vim.fs.root(0, { "pom.xml" })
+	if root_dir ~= nil then
+		local project_name = vim.fs.basename(root_dir)
+		M.config = {
+			enabled = true,
+			root_dir = root_dir,
+			project_name = project_name,
+			maven_dependencies = vim.fn.stdpath("cache") .. "/maven/" .. project_name .. "_dependencies.json",
+			m2_repository = os.getenv("HOME") .. "/.m2/repository/",
+		}
+		vim.api.nvim_create_user_command("MavenDependenciesInvalidate", function()
+			M.load_dependencies()
+		end, {})
+	end
+
+	local group = vim.api.nvim_create_augroup("maven", {})
+	vim.api.nvim_create_autocmd("BufReadCmd", {
+		group = group,
+		pattern = resource_file_prefix .. "*",
+		---@param args vim.api.keyset.create_autocmd.callback_args
+		callback = function(args)
+			open_jar_resource(args.match)
+		end,
+	})
+end
+
+M.load_dependencies = function()
+	vim.notify("Loading dependencies", vim.log.levels.INFO)
+	M.init_project_modules()
+	local items = M.fetch_dependencies()
+	local deps = Path:new(M.config.maven_dependencies)
+	deps:write(vim.json.encode(items), "w")
+	vim.notify("Dependencies loaded", vim.log.levels.INFO)
+end
+
+M.navigate = function(state, path)
+	if path == nil then
+		path = vim.fn.getcwd()
+	end
+	state.path = path
+	local items = register()
+	local renderer = require("neo-tree.ui.renderer")
+	renderer.show_nodes(items, state)
+end
+
+M.init_project_modules = function()
+	local out = vim.fn.system(
+		string.format(
+			"cd %s && mvn -Dexec.executable='echo' -Dexec.args='${project.groupId}:${project.artifactId}:${project.version}' exec:exec -q -o",
+			M.config.root_dir
+		)
+	)
+	M.modules = {}
+	M.modules_hash_list = {}
+
+	for _, line in pairs(vim.split(out, "\n")) do
+		local tokens = vim.split(line, ":")
+		if tokens and #tokens == 3 then
+			local module = {
+				group_id = tokens[1],
+				artifact_id = tokens[2],
+				version = tokens[3],
+			}
+
+			table.insert(M.modules, module)
+			M.modules_hash_list[line] = true
+			vim.notify("'" .. line .. "'", vim.log.levels.WARN)
+		end
+	end
+end
+
 local extract_metadata_from_uri = function(class)
 	local packageName = ""
 	local className = ""
@@ -26,8 +137,9 @@ end
 local ends_with = function(str, suffix)
 	return suffix == "" or str:sub(-#suffix) == suffix
 end
-local explore_jar = function(group_id, artifact_id, version)
+local render_node = function(module_artifact_id ,group_id, artifact_id, version)
 	local fqdn = group_id .. ":" .. artifact_id .. ":" .. version
+	-- vim.notify("processing " .. fqdn, vim.log.levels.WARN)
 	local dependency = {
 		id = fqdn,
 		name = fqdn,
@@ -35,7 +147,7 @@ local explore_jar = function(group_id, artifact_id, version)
 		stat_provider = "maven-custom",
 		children = {},
 	}
-	local jar_prefix = M.config.m2_reprository
+	local jar_prefix = M.config.m2_repository
 		.. string.gsub(group_id, "%.", "/")
 		.. "/"
 		.. artifact_id
@@ -55,7 +167,9 @@ local explore_jar = function(group_id, artifact_id, version)
 		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s", jar_javadoc:gsub("/", "%%5C/"))
 	end
 
-	local cmd = "unzip -l " .. jar .. " | tail -n +4 | head -n -2 | awk '{for (i=4; i<=NF; i++) { printf(\"%s%s\",( (i>4) ? \" \" : \"\" ), $i) } print \"\"}' "
+	local cmd = "unzip -l "
+		.. jar
+		.. ' | tail -n +4 | head -n -2 | awk \'{for (i=4; i<=NF; i++) { printf("%s%s",( (i>4) ? " " : "" ), $i) } print ""}\' '
 	local content = vim.fn.system(cmd)
 
 	for _, class in pairs(vim.split(content, "\n")) do
@@ -69,11 +183,12 @@ local explore_jar = function(group_id, artifact_id, version)
 				if ends_with(className, ".class") then
 					filter = string.find(className, "%$") ~= nil
 					name = string.format(
-						"jdt://contents/%s-%s.jar/%s/%s?=demo/%s=/maven.pomderived=/true%s%%5C!%%5C/=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s(%s",
+						"jdt://contents/%s-%s.jar/%s/%s?=%s/%s=/maven.pomderived=/true%s%%5C!%%5C/=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s(%s",
 						artifact_id,
 						version,
 						packageName,
 						className,
+						module_artifact_id,
 						jar:gsub("/", "%%5C/"),
 						java_doc_cmd,
 						group_id,
@@ -139,134 +254,48 @@ local explore_jar = function(group_id, artifact_id, version)
 	end
 	return dependency
 end
-local register = function()
-	if M.config.enabled == false then
-		return {}
-	end
-	local deps = Path:new(M.config.maven_dependencies)
-	if not deps:exists() then
-		M.load_dependencies()
-	end
-	local items_data = deps:read()
-	return vim.json.decode(items_data)
-end
-local open_jar_resource = function(jar_resource)
-	local buf = vim.api.nvim_get_current_buf()
-	local address = string.sub(jar_resource, #resource_file_prefix)
-	local tokens = vim.split(address, "::")
-	local jar = tokens[1]
-	local resource = tokens[2]
-	vim.bo[buf].modifiable = true
-	vim.bo[buf].swapfile = false
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].filetype = "java"
+M._explore_children = function(artifact_id, node, neotree_nodes, processed_nodes)
+	if node.children then
+		for _, child in pairs(node.children) do
+			local key = string.format("%s:%s:%s", child.groupId, child.artifactId, child.version)
+			local is_sub_module = M.modules_hash_list[key] ~= nil
+			local is_processed = processed_nodes[key] ~= nil
+			local invalid_scope = node.scope == "test" or node.scope == "provided"
+			local discard = is_sub_module or is_processed or invalid_scope
 
-	local content = vim.fn.system("unzip -p " .. jar .. " " .. resource .. " | less")
-	if not content then
-		vim.notify("Impossible de lire " .. resource .. " depuis " .. jar, vim.log.levels.ERROR)
-		return
-	end
+			if not discard then
+				local neotree_node = render_node(artifact_id, child.groupId, child.artifactId, child.version)
+				table.insert(neotree_nodes, neotree_node)
+				processed_nodes[key] = true
 
-	-- charger les lignes
-	local normalized = string.gsub(content, "\r\n", "\n")
-	local source_lines = vim.split(normalized, "\n", { plain = true })
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, source_lines)
-	vim.bo[buf].modifiable = false
-	vim.bo[buf].readonly = true
-end
-
-M.setup = function()
-	M.config = {
-		enabled = false,
-	}
-	local root_dir = vim.fs.root(0, { "pom.xml" })
-	if root_dir ~= nil then
-		local project_name = vim.fs.basename(root_dir)
-		M.config = {
-			enabled = true,
-			root_dir = root_dir,
-			project_name = project_name,
-			maven_dependencies = vim.fn.stdpath("cache") .. "/maven/" .. project_name .. "_dependencies.json",
-			m2_reprository = os.getenv("HOME") .. "/.m2/repository/",
-		}
-		vim.api.nvim_create_user_command("MavenDependenciesInvalidate", function()
-			M.load_dependencies()
-		end, {})
-	end
-
-	local group = vim.api.nvim_create_augroup("maven", {})
-	vim.api.nvim_create_autocmd("BufReadCmd", {
-		group = group,
-		pattern = resource_file_prefix .. "*",
-		---@param args vim.api.keyset.create_autocmd.callback_args
-		callback = function(args)
-			open_jar_resource(args.match)
-		end,
-	})
-end
-
-M.load_dependencies = function()
-	vim.notify("Loading dependencies", vim.log.levels.INFO)
-	local temp_file = M.config.maven_dependencies .. ".tmp"
-	vim.fn.system(
-		"cd "
-			.. M.config.root_dir
-			.. " && mvn -o dependency:list -DincludeScope=compile -Dsort -DoutputFile="
-			.. temp_file
-			.. ".2"
-			.. " && tail -n +3 "
-			.. temp_file
-			.. ".2"
-			.. " | uniq | sort > "
-			.. temp_file
-	)
-	vim.fn.delete(temp_file .. ".2")
-
-	local f = assert(io.open(temp_file, "rb"))
-	local lines = f:lines()
-	local items = {}
-	for line in lines do
-		if line ~= "" then
-			line = string.gsub(line, "%s*", "")
-			local split = vim.split(line, ":")
-			local group_id = split[1]
-			local artifact_id = split[2]
-			local version = split[4]
-
-			local dependency = explore_jar(group_id, artifact_id, version)
-			table.insert(items, dependency)
+				M._explore_children(artifact_id, child, neotree_nodes, processed_nodes)
+			end
 		end
 	end
-	f:close()
-	vim.fn.delete(temp_file)
-	local deps = Path:new(M.config.maven_dependencies)
-	deps:write(vim.json.encode(items), "w")
-	vim.notify("Dependencies loaded", vim.log.levels.INFO)
 end
 
-M.navigate = function(state, path)
-	if path == nil then
-		path = vim.fn.getcwd()
-	end
-	state.path = path
-	local items = register()
-	local renderer = require("neo-tree.ui.renderer")
-	renderer.show_nodes(items, state)
-end
+M.fetch_dependencies = function()
+	local dependencies = {}
+	local processed = {}
+	for _, module in pairs(M.modules) do
+		vim.notify("Finding dependencies for artifact_id " .. module.artifact_id, vim.log.levels.WARN)
+		local temp_file_name = os.tmpname()
+		vim.fn.system(
+			string.format(
+				"cd %s && mvn dependency:3.9.0:tree -DoutputType=json -pl :%s -DoutputFile=%s",
+				M.config.root_dir,
+				module.artifact_id,
+				temp_file_name
+			)
+		)
 
-function M.on_enter_directory(state)
-	local node = state.tree:get_node()
-	vim.notify(node.name, vim.log.levels.WARN)
-	if not node or node.type ~= "directory" then
-		return
-	end
+		local path = Path:new(temp_file_name)
+		local module_dependencies = vim.json.decode(path:read())
+		M._explore_children(module.artifact_id, module_dependencies, dependencies, processed)
 
-	local path = node:get_id()
-	if M.saved_dirs[path] then
-		-- Résout les fils automatiquement
-		local fs_commands = require("neo-tree.sources.filesystem.commands")
-		fs_commands.expand_node(state)
+		vim.fn.delete(temp_file_name)
 	end
+	return dependencies
 end
 
 return M
