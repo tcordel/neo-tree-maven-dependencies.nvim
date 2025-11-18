@@ -74,6 +74,9 @@ M.load_dependencies = function()
 	vim.notify("Loading dependencies", vim.log.levels.INFO)
 	M.init_project_modules()
 	local items = M.fetch_dependencies()
+	table.sort(items, function (a, b)
+		return a.id < b.id
+	end)
 	local deps = Path:new(M.config.maven_dependencies)
 	deps:write(vim.json.encode(items), "w")
 	vim.notify("Dependencies loaded", vim.log.levels.INFO)
@@ -110,7 +113,6 @@ M.init_project_modules = function()
 
 			table.insert(M.modules, module)
 			M.modules_hash_list[line] = true
-			vim.notify("'" .. line .. "'", vim.log.levels.WARN)
 		end
 	end
 end
@@ -137,7 +139,7 @@ end
 local ends_with = function(str, suffix)
 	return suffix == "" or str:sub(-#suffix) == suffix
 end
-local render_node = function(module_artifact_id ,group_id, artifact_id, version)
+local render_node = function(module_artifact_id ,group_id, artifact_id, version, scode)
 	local fqdn = group_id .. ":" .. artifact_id .. ":" .. version
 	-- vim.notify("processing " .. fqdn, vim.log.levels.WARN)
 	local dependency = {
@@ -146,6 +148,10 @@ local render_node = function(module_artifact_id ,group_id, artifact_id, version)
 		type = "directory",
 		stat_provider = "maven-custom",
 		children = {},
+		extra = {
+			module = module_artifact_id,
+			scode = scode
+		}
 	}
 	local jar_prefix = M.config.m2_repository
 		.. string.gsub(group_id, "%.", "/")
@@ -264,7 +270,7 @@ M._explore_children = function(artifact_id, node, neotree_nodes, processed_nodes
 			local discard = is_sub_module or is_processed or invalid_scope
 
 			if not discard then
-				local neotree_node = render_node(artifact_id, child.groupId, child.artifactId, child.version)
+				local neotree_node = render_node(artifact_id, child.groupId, child.artifactId, child.version, child.scope)
 				table.insert(neotree_nodes, neotree_node)
 				processed_nodes[key] = true
 
