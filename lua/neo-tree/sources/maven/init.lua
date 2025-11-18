@@ -139,7 +139,7 @@ end
 local ends_with = function(str, suffix)
 	return suffix == "" or str:sub(-#suffix) == suffix
 end
-local render_node = function(module_artifact_id ,group_id, artifact_id, version, scode)
+local render_node = function(module_artifact_id ,group_id, artifact_id, version, scope)
 	local fqdn = group_id .. ":" .. artifact_id .. ":" .. version
 	-- vim.notify("processing " .. fqdn, vim.log.levels.WARN)
 	local dependency = {
@@ -150,7 +150,7 @@ local render_node = function(module_artifact_id ,group_id, artifact_id, version,
 		children = {},
 		extra = {
 			module = module_artifact_id,
-			scode = scode
+			scope = scope
 		}
 	}
 	local jar_prefix = M.config.m2_repository
