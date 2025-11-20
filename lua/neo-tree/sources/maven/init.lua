@@ -1,4 +1,8 @@
 local Path = require("plenary.path")
+local utils = require("neo-tree.utils")
+local manager = require("neo-tree.sources.manager")
+local events = require("neo-tree.events")
+local renderer = require("neo-tree.ui.renderer")
 local M = {
 	name = "maven",
 }
@@ -68,13 +72,23 @@ M.setup = function()
 			open_jar_resource(args.match)
 		end,
 	})
+
+	-- Configure event handler for follow_current_file option
+	manager.subscribe(M.name, {
+		event = events.VIM_BUFFER_ENTER,
+		handler = M.follow,
+	})
+	manager.subscribe(M.name, {
+		event = events.VIM_TERMINAL_ENTER,
+		handler = M.follow,
+	})
 end
 
 M.load_dependencies = function()
 	vim.notify("Loading dependencies", vim.log.levels.INFO)
 	M.init_project_modules()
 	local items = M.fetch_dependencies()
-	table.sort(items, function (a, b)
+	table.sort(items, function(a, b)
 		return a.id < b.id
 	end)
 	local deps = Path:new(M.config.maven_dependencies)
@@ -139,7 +153,7 @@ end
 local ends_with = function(str, suffix)
 	return suffix == "" or str:sub(-#suffix) == suffix
 end
-local render_node = function(module_artifact_id ,group_id, artifact_id, version, scope)
+local render_node = function(module_artifact_id, group_id, artifact_id, version, scope)
 	local fqdn = group_id .. ":" .. artifact_id .. ":" .. version
 	-- vim.notify("processing " .. fqdn, vim.log.levels.WARN)
 	local dependency = {
@@ -150,8 +164,8 @@ local render_node = function(module_artifact_id ,group_id, artifact_id, version,
 		children = {},
 		extra = {
 			module = module_artifact_id,
-			scope = scope
-		}
+			scope = scope,
+		},
 	}
 	local jar_prefix = M.config.m2_repository
 		.. string.gsub(group_id, "%.", "/")
@@ -175,7 +189,7 @@ local render_node = function(module_artifact_id ,group_id, artifact_id, version,
 
 	local cmd = "unzip -l "
 		.. jar
-		.. ' | tail -n +4 | head -n -2 | awk \'{for (i=4; i<=NF; i++) { printf("%s%s",( (i>4) ? " " : "" ), $i) } print ""}\' '
+		.. ' | tail -n +4 | head -n -2 | awk \'{for (i=4; i<=NF; i++) { printf("%s%s",( (i>4) ? " " : "" ), $i) } print ""}\' | sort'
 	local content = vim.fn.system(cmd)
 
 	for _, class in pairs(vim.split(content, "\n")) do
@@ -189,7 +203,7 @@ local render_node = function(module_artifact_id ,group_id, artifact_id, version,
 				if ends_with(className, ".class") then
 					filter = string.find(className, "%$") ~= nil
 					name = string.format(
-						"jdt://contents/%s-%s.jar/%s/%s?=%s/%s=/maven.pomderived=/true%s%%5C!%%5C/=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s(%s",
+						"jdt://contents/%s-%s.jar/%s/%s?=%s/%s=/maven.pomderived=/true%s=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s(%s",
 						artifact_id,
 						version,
 						packageName,
@@ -270,7 +284,8 @@ M._explore_children = function(artifact_id, node, neotree_nodes, processed_nodes
 			local discard = is_sub_module or is_processed or invalid_scope
 
 			if not discard then
-				local neotree_node = render_node(artifact_id, child.groupId, child.artifactId, child.version, child.scope)
+				local neotree_node =
+					render_node(artifact_id, child.groupId, child.artifactId, child.version, child.scope)
 				table.insert(neotree_nodes, neotree_node)
 				processed_nodes[key] = true
 
@@ -302,6 +317,55 @@ M.fetch_dependencies = function()
 		vim.fn.delete(temp_file_name)
 	end
 	return dependencies
+end
+
+local get_state = function()
+	return manager.get_state(M.name)
+end
+local follow_internal = function()
+	if vim.bo.filetype == "neo-tree" or vim.bo.filetype == "neo-tree-popup" then
+		return
+	end
+	local bufnr = vim.api.nvim_get_current_buf()
+	local path_to_reveal = manager.get_path_to_reveal(true) or tostring(bufnr)
+
+	local state = get_state()
+	if state.current_position == "float" then
+		vim.notify("discard1", vim.log.levels.WARN)
+		return false
+	end
+	if not state.path then
+		vim.notify("discard2", vim.log.levels.WARN)
+		return false
+	end
+	vim.notify("OK", vim.log.levels.WARN)
+	local window_exists = renderer.window_exists(state)
+	if window_exists then
+		local node = state.tree and state.tree:get_node()
+		if node then
+			if node:get_id() == path_to_reveal then
+				-- already focused
+				return false
+			end
+		end
+		renderer.focus_node(state, path_to_reveal, true)
+	else
+		vim.notify("Node not found", vim.log.levels.WARN)
+	end
+end
+
+M.follow = function()
+	local bufname = vim.fn.bufname(0)
+	if
+		bufname == "COMMIT_EDITMSG"
+		or not (vim.startswith(bufname, resource_file_prefix) or vim.startswith(bufname, "jdt://"))
+	then
+		return false
+	end
+	vim.notify("FOLLOW", vim.log.levels.WARN)
+	utils.debounce("neo-tree-maven-follow", function()
+		return follow_internal()
+	end, 100, utils.debounce_strategy.CALL_LAST_ONLY)
 end
 
 return M
