@@ -32,7 +32,6 @@ local open_jar_resource = function(jar_resource)
 
 	local content = vim.fn.system("unzip -p " .. jar .. " " .. resource .. " | less")
 	if not content then
-		vim.notify("Impossible de lire " .. resource .. " depuis " .. jar, vim.log.levels.ERROR)
 		return
 	end
 
@@ -155,7 +154,6 @@ local ends_with = function(str, suffix)
 end
 local render_node = function(module_artifact_id, group_id, artifact_id, version, scope)
 	local fqdn = group_id .. ":" .. artifact_id .. ":" .. version
-	-- vim.notify("processing " .. fqdn, vim.log.levels.WARN)
 	local dependency = {
 		id = fqdn,
 		name = fqdn,
@@ -299,7 +297,6 @@ M.fetch_dependencies = function()
 	local dependencies = {}
 	local processed = {}
 	for _, module in pairs(M.modules) do
-		vim.notify("Finding dependencies for artifact_id " .. module.artifact_id, vim.log.levels.WARN)
 		local temp_file_name = os.tmpname()
 		vim.fn.system(
 			string.format(
@@ -331,14 +328,11 @@ local follow_internal = function()
 
 	local state = get_state()
 	if state.current_position == "float" then
-		vim.notify("discard1", vim.log.levels.WARN)
 		return false
 	end
 	if not state.path then
-		vim.notify("discard2", vim.log.levels.WARN)
 		return false
 	end
-	vim.notify("OK", vim.log.levels.WARN)
 	local window_exists = renderer.window_exists(state)
 	if window_exists then
 		local node = state.tree and state.tree:get_node()
@@ -349,8 +343,6 @@ local follow_internal = function()
 			end
 		end
 		renderer.focus_node(state, path_to_reveal, true)
-	else
-		vim.notify("Node not found", vim.log.levels.WARN)
 	end
 end
 
@@ -362,7 +354,6 @@ M.follow = function()
 	then
 		return false
 	end
-	vim.notify("FOLLOW", vim.log.levels.WARN)
 	utils.debounce("neo-tree-maven-follow", function()
 		return follow_internal()
 	end, 100, utils.debounce_strategy.CALL_LAST_ONLY)
