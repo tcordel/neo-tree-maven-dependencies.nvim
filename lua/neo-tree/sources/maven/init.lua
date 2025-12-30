@@ -182,7 +182,7 @@ local render_node = function(module_artifact_id, group_id, artifact_id, version,
 	local javadoc_present = Path.new(jar_javadoc):exists()
 	local java_doc_cmd = ""
 	if javadoc_present == true then
-		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s", jar_javadoc:gsub("/", "%%5C/"))
+		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s%%5C!%%5C/", jar_javadoc:gsub("/", "%%5C/"))
 	end
 
 	local cmd = "unzip -l "
