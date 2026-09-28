@@ -91,6 +91,7 @@ M.load_dependencies = function()
 		return a.id < b.id
 	end)
 	local deps = Path:new(M.config.maven_dependencies)
+	deps:parent():mkdir({ parents = true, exists_ok = true })
 	deps:write(vim.json.encode(items), "w")
 	vim.notify("Dependencies loaded", vim.log.levels.INFO)
 end
