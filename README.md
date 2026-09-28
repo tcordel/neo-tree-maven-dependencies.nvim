@@ -9,6 +9,11 @@ But in some cases, i needed to scrub into a jar content to get more details abou
 
 ![Neotree maven example](./images/neotree-maven-example.png)
 
+## Commands
+
+* `:MavenDependenciesInvalidate` — reload the dependency cache.
+* `:MavenOpenClass` — prompt for a Java class name, resolve it via jdtls's `workspace/symbol` request, and open the matching decompiled class directly (no need to browse the tree). If several jars provide a class with that name, pick one from a list showing `groupId:artifactId:version`.
+
 ## Installation
 
 > **_NOTE_** Actually, this plugin is working only on linux

@@ -30,24 +30,84 @@ local get_state = function()
 	return manager.get_state(M.name)
 end
 
--- jdt:// ids embed the reactor module that first claimed the dependency
--- (eg. "?=eie-agent-service/..."), but a class opened via jdtls's own
--- go-to-definition may resolve through a *different* module that also
--- depends on the same jar, producing a URI that differs only in that
--- segment. Strip it so the two can be matched for "reveal in tree".
-local normalize_jdt_id = function(id)
-	if id == nil then
-		return id
+-- This module never builds an eclipse.jdt.ls "jdt://" handle-identifier
+-- itself: those are opaque, server-owned mementos. Class nodes instead get
+-- our own tiny "mvnclass://groupId/artifactId/version/package/Class.class"
+-- locator, resolved to a real jdt:// URI on demand via jdtls's own
+-- `workspace/symbol` request (see resolve_maven_class below). `node_key`
+-- gives both a maven coordinate + package/class tuple and a real jdt://
+-- URI (whose maven.* query fields and path segment carry the same info)
+-- a common identity to compare against, for both resolving and for
+-- "reveal in tree" matching.
+local node_key = function(group_id, artifact_id, version, package_name, class_name)
+	return table.concat({ group_id, artifact_id, version, package_name, class_name }, "::")
+end
+
+local parse_mvnclass_id = function(id)
+	if id == nil or not vim.startswith(id, "mvnclass://") then
+		return nil
 	end
-	return (id:gsub("^(jdt://[^?]*%?=)[^/]+/", "%1"))
+	return id:match("^mvnclass://([^/]+)/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+end
+
+local extract_maven_field = function(uri, field)
+	return uri:match("maven%." .. field .. "=/([^=]+)")
+end
+
+local resolve_key = function(uri)
+	if uri == nil then
+		return nil
+	end
+	if vim.startswith(uri, "mvnclass://") then
+		local group_id, artifact_id, version, package_name, class_name = parse_mvnclass_id(uri)
+		if not group_id then
+			return nil
+		end
+		return node_key(group_id, artifact_id, version, package_name, class_name)
+	end
+	if vim.startswith(uri, "jdt://") then
+		local package_and_class = uri:match("^jdt://contents/[^/]+/(.-)%?")
+		local group_id = extract_maven_field(uri, "groupId")
+		local artifact_id = extract_maven_field(uri, "artifactId")
+		local version = extract_maven_field(uri, "version")
+		if not (package_and_class and group_id and artifact_id and version) then
+			return nil
+		end
+		local package_name, class_name = package_and_class:match("^(.-)/([^/]+)$")
+		if not package_name then
+			return nil
+		end
+		return node_key(group_id, artifact_id, version, package_name, class_name:gsub("%.java$", ".class"))
+	end
+	return nil
+end
+
+-- Opens a jdt:// URI the way LSP's own jump_to_location does (vim.uri_to_bufnr
+-- + bufload + nvim_win_set_buf), NOT `:edit <uri>`: fnameescape (used by
+-- neo-tree's own escape_path_for_cmd, meant for real filesystem paths)
+-- inserts backslashes before "%" and other punctuation, corrupting the URI
+-- text nvim-jdtls forwards verbatim to eclipse.jdt.ls, which then can't
+-- resolve it. `bufload` is what actually fires BufReadCmd for a fresh,
+-- unloaded custom-scheme buffer.
+local open_jdt_uri = function(uri, previous_buf)
+	local new_buf = vim.uri_to_bufnr(uri)
+	vim.bo[new_buf].buflisted = true
+	vim.fn.bufload(new_buf)
+	vim.api.nvim_win_set_buf(0, new_buf)
+	if previous_buf and previous_buf ~= new_buf and vim.api.nvim_buf_is_valid(previous_buf) then
+		pcall(vim.api.nvim_buf_delete, previous_buf, { force = true })
+	end
 end
 
 local build_id_index = function(items)
 	local index = {}
 	local function walk(nodes)
 		for _, node in pairs(nodes) do
-			if node.id and vim.startswith(node.id, "jdt://") then
-				index[normalize_jdt_id(node.id)] = node.id
+			if node.id and vim.startswith(node.id, "mvnclass://") then
+				local key = resolve_key(node.id)
+				if key then
+					index[key] = node.id
+				end
 			end
 			if node.children then
 				walk(node.children)
@@ -149,24 +209,165 @@ local open_jar_resource = function(jar_resource)
 	end)
 end
 
-M.setup = function()
-	M.config = {
-		enabled = false,
-	}
-	if vim.fn.has("nvim-0.10") == 0 then
-		vim.notify("neo-tree-maven-dependencies requires Neovim >= 0.10 (uses vim.system)", vim.log.levels.ERROR)
+-- Resolve a class by name via jdtls's own `workspace/symbol` request instead
+-- of hand-building a jdt:// URI: the server returns the real URI for every
+-- matching symbol (including library classes), so we only need to filter
+-- and open it.
+M.open_class_by_symbol = function()
+	local client = vim.lsp.get_clients({ name = "jdtls" })[1]
+	if not client then
+		vim.notify("No active jdtls client", vim.log.levels.ERROR)
+		return
+	end
+
+	vim.ui.input({ prompt = "Java class name: " }, function(query)
+		if query == nil or query == "" then
+			return
+		end
+
+		client:request("workspace/symbol", { query = query }, function(err, result)
+			if err then
+				vim.notify("workspace/symbol failed: " .. vim.inspect(err), vim.log.levels.ERROR)
+				return
+			end
+			if not result or #result == 0 then
+				vim.notify("No symbol found for " .. query, vim.log.levels.WARN)
+				return
+			end
+
+			local candidates = {}
+			for _, symbol in ipairs(result) do
+				local uri = symbol.location and symbol.location.uri
+				if uri and vim.startswith(uri, "jdt://") then
+					table.insert(candidates, symbol)
+				end
+			end
+			if #candidates == 0 then
+				vim.notify("No library class found for " .. query, vim.log.levels.WARN)
+				return
+			end
+
+			local function open(symbol)
+				open_jdt_uri(symbol.location.uri)
+			end
+
+			if #candidates == 1 then
+				open(candidates[1])
+				return
+			end
+
+			vim.ui.select(candidates, {
+				prompt = "Multiple matches for " .. query .. ", pick one:",
+				format_item = function(symbol)
+					local uri = symbol.location.uri
+					return string.format(
+						"%s (%s:%s:%s)",
+						symbol.containerName or symbol.name,
+						extract_maven_field(uri, "groupId") or "?",
+						extract_maven_field(uri, "artifactId") or "?",
+						extract_maven_field(uri, "version") or "?"
+					)
+				end,
+			}, function(choice)
+				if choice then
+					open(choice)
+				end
+			end)
+		end)
+	end)
+end
+
+-- Resolves a "mvnclass://groupId/artifactId/version/package/Class.class"
+-- locator to a real jdt:// URI via `workspace/symbol`, then hands off to
+-- jdtls entirely by re-editing that URI. Unlike `M.open_class_by_symbol`,
+-- the maven coordinate + package/class are already known exactly (they
+-- came from our own dependency tree), so the match must be exact and
+-- unambiguous, not a user-facing pick list.
+local show_buf_error = function(buf, message)
+	if not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(message, "\n"))
+	vim.bo[buf].modifiable = false
+end
+
+local resolve_maven_class = function(group_id, artifact_id, version, package_name, class_name, buf)
+	local client = vim.lsp.get_clients({ name = "jdtls" })[1]
+	if not client then
+		local message = "No active jdtls client to resolve " .. class_name
+		vim.notify(message, vim.log.levels.ERROR)
+		show_buf_error(buf, message)
+		return
+	end
+
+	local wanted_key = node_key(group_id, artifact_id, version, package_name, class_name)
+	local simple_name = class_name:gsub("%.class$", ""):gsub("^.*%$", "")
+
+	client:request("workspace/symbol", { query = simple_name }, function(err, result)
+		if err or not result then
+			local message = "workspace/symbol failed for " .. simple_name .. ": " .. vim.inspect(err)
+			vim.notify(message, vim.log.levels.ERROR)
+			show_buf_error(buf, message)
+			return
+		end
+		for _, symbol in ipairs(result) do
+			local uri = symbol.location and symbol.location.uri
+			if uri and vim.startswith(uri, "jdt://") and resolve_key(uri) == wanted_key then
+				open_jdt_uri(uri, buf)
+				return
+			end
+		end
+		local message = "Could not resolve " .. wanted_key .. " via workspace/symbol"
+		vim.notify(message, vim.log.levels.ERROR)
+		show_buf_error(buf, message)
+	end, buf)
+end
+
+local open_mvn_class = function(match)
+	local group_id, artifact_id, version, package_name, class_name = parse_mvnclass_id(match)
+	if not group_id then
+		vim.notify("Invalid maven class locator: " .. match, vim.log.levels.ERROR)
+		return
+	end
+
+	local buf = vim.api.nvim_get_current_buf()
+	vim.bo[buf].swapfile = false
+	vim.bo[buf].buftype = "nofile"
+	vim.bo[buf].buflisted = false
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Resolving " .. class_name .. " via workspace/symbol..." })
+	vim.bo[buf].modifiable = false
+
+	resolve_maven_class(group_id, artifact_id, version, package_name, class_name, buf)
+end
+
+-- `M.setup()` runs once, very early — depending on the plugin manager's load
+-- timing it can fire before any real buffer exists (e.g. lazy.nvim calling
+-- `setup()` ahead of the argument files finishing loading), so detecting
+-- `pom.xml` against buffer 0 here can miss the project entirely and leave
+-- the source permanently disabled for the session. Re-run detection lazily
+-- from `M.navigate`/`M.invalidate` too, against whatever buffer is current
+-- at that point, so a late/lazy setup still finds the project once the
+-- tree is actually opened.
+local ensure_config = function()
+	if M.config.enabled then
 		return
 	end
 	local root_dir = vim.fs.root(0, { "pom.xml" })
-	if root_dir ~= nil then
-		local project_name = vim.fs.basename(root_dir)
-		M.config = {
-			enabled = true,
-			root_dir = root_dir,
-			project_name = project_name,
-			maven_dependencies = vim.fn.stdpath("cache") .. "/maven/" .. project_name .. "_dependencies.json",
-			m2_repository = os.getenv("HOME") .. "/.m2/repository/",
-		}
+	if root_dir == nil then
+		return
+	end
+	local project_name = vim.fs.basename(root_dir)
+	M.config = {
+		enabled = true,
+		root_dir = root_dir,
+		project_name = project_name,
+		maven_dependencies = vim.fn.stdpath("cache") .. "/maven/" .. project_name .. "_dependencies.json",
+		m2_repository = os.getenv("HOME") .. "/.m2/repository/",
+	}
+	if not M._invalidate_cmd_created then
+		M._invalidate_cmd_created = true
 		vim.api.nvim_create_user_command("MavenDependenciesInvalidate", function()
 			local state = get_state()
 			if state and state.tree then
@@ -183,6 +384,20 @@ M.setup = function()
 			end)
 		end, {})
 	end
+end
+
+M.setup = function()
+	M.config = {
+		enabled = false,
+	}
+	if vim.fn.has("nvim-0.10") == 0 then
+		vim.notify("neo-tree-maven-dependencies requires Neovim >= 0.10 (uses vim.system)", vim.log.levels.ERROR)
+		return
+	end
+
+	vim.api.nvim_create_user_command("MavenOpenClass", M.open_class_by_symbol, {})
+
+	ensure_config()
 
 	local group = vim.api.nvim_create_augroup("maven", {})
 	vim.api.nvim_create_autocmd("BufReadCmd", {
@@ -191,6 +406,14 @@ M.setup = function()
 		---@param args vim.api.keyset.create_autocmd.callback_args
 		callback = function(args)
 			open_jar_resource(args.match)
+		end,
+	})
+	vim.api.nvim_create_autocmd("BufReadCmd", {
+		group = group,
+		pattern = "mvnclass://*",
+		---@param args vim.api.keyset.create_autocmd.callback_args
+		callback = function(args)
+			open_mvn_class(args.match)
 		end,
 	})
 
@@ -237,6 +460,7 @@ M.load_dependencies = function(on_done)
 end
 
 M.navigate = function(state, path)
+	ensure_config()
 	if path == nil then
 		path = vim.fn.getcwd()
 	end
@@ -331,13 +555,6 @@ local build_dependency_tree = function(module_artifact_id, group_id, artifact_id
 		},
 	}
 
-	local jar_javadoc = jar:gsub("%.jar$", "-javadoc.jar")
-	local javadoc_present = Path.new(jar_javadoc):exists()
-	local java_doc_cmd = ""
-	if javadoc_present == true then
-		java_doc_cmd = string.format("=/=/javadoc_location=/jar:file:%s%%5C!%%5C/", jar_javadoc:gsub("/", "%%5C/"))
-	end
-
 	for _, class in pairs(vim.split(content, "\n")) do
 		if class ~= nil and class ~= "" then
 			local packageName, className, packageTokens = extract_metadata_from_uri(class)
@@ -347,22 +564,7 @@ local build_dependency_tree = function(module_artifact_id, group_id, artifact_id
 				local filter = false
 				if ends_with(className, ".class") then
 					filter = string.find(className, "%$") ~= nil
-					local javaName = className:sub(0, -7)
-					name = string.format(
-						"jdt://contents/%s-%s.jar/%s/%s?=%s/%s=/maven.pomderived=/true%s=/=/maven.groupId=/%s=/=/maven.artifactId=/%s=/=/maven.version=/%s=/=/maven.scope=/compile=/=/maven.pomderived=/true=/%%3C%s%%28%s",
-						artifact_id,
-						version,
-						packageName,
-						javaName .. ".java",
-						module_artifact_id,
-						jar:gsub("/", "%%5C/"),
-						java_doc_cmd,
-						group_id,
-						artifact_id,
-						version,
-						packageName,
-						className
-					)
+					name = string.format("mvnclass://%s/%s/%s/%s/%s", group_id, artifact_id, version, packageName, className)
 				else
 					name = resource_file_prefix .. jar .. "::" .. class
 				end
@@ -571,7 +773,7 @@ local follow_internal = function()
 	local bufnr = vim.api.nvim_get_current_buf()
 	local path_to_reveal = manager.get_path_to_reveal(true) or tostring(bufnr)
 	if M._jdt_id_index then
-		local resolved = M._jdt_id_index[normalize_jdt_id(path_to_reveal)]
+		local resolved = M._jdt_id_index[resolve_key(path_to_reveal)]
 		if resolved then
 			path_to_reveal = resolved
 		end
@@ -601,7 +803,11 @@ M.follow = function()
 	local bufname = vim.fn.bufname(0)
 	if
 		bufname == "COMMIT_EDITMSG"
-		or not (vim.startswith(bufname, resource_file_prefix) or vim.startswith(bufname, "jdt://"))
+		or not (
+			vim.startswith(bufname, resource_file_prefix)
+			or vim.startswith(bufname, "jdt://")
+			or vim.startswith(bufname, "mvnclass://")
+		)
 	then
 		return false
 	end
