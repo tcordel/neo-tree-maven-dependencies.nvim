@@ -322,8 +322,10 @@ end
 -- `M.setup()` runs once, very early — depending on the plugin manager's load
 -- timing it can fire before any real buffer exists (e.g. lazy.nvim calling
 -- `setup()` ahead of the argument files finishing loading), so detecting
--- `pom.xml` against buffer 0 here can miss the project entirely and leave
--- the source permanently disabled for the session. Re-run detection lazily
+-- the project root against buffer 0 here can miss the project entirely and
+-- leave the source permanently disabled for the session. `.git` is checked
+-- ahead of `pom.xml` so a multi-module repo resolves to the repo root, not
+-- the nearest submodule's pom.xml. Re-run detection lazily
 -- from `M.navigate`/`M.invalidate` too, against whatever buffer is current
 -- at that point, so a late/lazy setup still finds the project once the
 -- tree is actually opened.
@@ -331,7 +333,7 @@ local ensure_config = function()
 	if M.config.enabled then
 		return
 	end
-	local root_dir = vim.fs.root(0, { "pom.xml" })
+	local root_dir = vim.fs.root(0, { ".git" }) or vim.fs.root(0, { "pom.xml" })
 	if root_dir == nil then
 		return
 	end
@@ -463,7 +465,6 @@ M.init_project_modules = function(callback)
 		"-Dexec.args=${project.groupId}:${project.artifactId}:${project.version}",
 		"org.codehaus.mojo:exec-maven-plugin:1.6.0:exec",
 		"-q",
-		"-o",
 	}, { cwd = M.config.root_dir, text = true }, function(result)
 		if result.code ~= 0 then
 			vim.notify(
@@ -685,64 +686,64 @@ M._explore_children = function(artifact_id, node, neotree_nodes, processed_nodes
 	end
 end
 
+-- A relative `-DoutputFile` makes the dependency:tree goal write one tree
+-- file per reactor module, next to each module's own pom.xml, in a single
+-- `mvn` invocation covering the whole reactor (no per-module `-pl` looping).
+local dependency_tree_relative_file = function()
+	return string.format(".neotree-maven-dependency-tree-%d.json", vim.fn.getpid())
+end
+
 M.fetch_dependencies = function(callback)
 	local dependencies = {}
 	local processed = {}
-	local total_modules = #M.modules
+	local relative_file = dependency_tree_relative_file()
 
-	local function process_module(index)
-		if index > total_modules then
+	M._system_async({
+		M.config.mvn_cmd,
+		"dependency:3.9.0:tree",
+		"-DoutputType=json",
+		"-DoutputFile=" .. relative_file,
+	}, { cwd = M.config.root_dir, text = true }, function(result)
+		local tree_files = vim.fn.globpath(M.config.root_dir, "**/" .. relative_file, false, true)
+
+		if result.code ~= 0 then
+			vim.notify(
+				string.format("mvn dependency:tree failed (exit %d):\n%s\n%s", result.code, result.stdout or "", result.stderr or ""),
+				vim.log.levels.WARN
+			)
+			for _, tree_file in ipairs(tree_files) do
+				vim.fn.delete(tree_file)
+			end
 			callback(dependencies)
 			return
 		end
 
-		local module = M.modules[index]
-		M._progress(
-			string.format("Resolving dependencies (module %d/%d: %s)...", index, total_modules, module.artifact_id)
-		)
-
-		local temp_file_name = os.tmpname()
-		M._system_async({
-			M.config.mvn_cmd,
-			"dependency:3.9.0:tree",
-			"-DoutputType=json",
-			"-pl",
-			":" .. module.artifact_id,
-			"-DoutputFile=" .. temp_file_name,
-		}, { cwd = M.config.root_dir, text = true }, function(result)
-			if result.code ~= 0 then
-				vim.notify(
-					string.format(
-						"mvn dependency:tree failed for %s (exit %d):\n%s\n%s",
-						module.artifact_id,
-						result.code,
-						result.stdout or "",
-						result.stderr or ""
-					),
-					vim.log.levels.WARN
-				)
-				vim.fn.delete(temp_file_name)
-				process_module(index + 1)
+		local total = #tree_files
+		local function process_tree_file(index)
+			if index > total then
+				callback(dependencies)
 				return
 			end
 
+			local tree_file = tree_files[index]
 			local ok, module_dependencies = pcall(function()
-				return vim.json.decode(Path:new(temp_file_name):read())
+				return vim.json.decode(Path:new(tree_file):read())
 			end)
-			vim.fn.delete(temp_file_name)
+			vim.fn.delete(tree_file)
 			if not ok then
-				vim.notify("Failed to parse dependency tree for " .. module.artifact_id, vim.log.levels.WARN)
-				process_module(index + 1)
+				vim.notify("Failed to parse dependency tree " .. tree_file, vim.log.levels.WARN)
+				process_tree_file(index + 1)
 				return
 			end
 
-			M._explore_children(module.artifact_id, module_dependencies, dependencies, processed, function()
-				process_module(index + 1)
+			M._progress(string.format("Resolving dependencies (module %d/%d: %s)...", index, total, module_dependencies.artifactId))
+			M._explore_children(module_dependencies.artifactId, module_dependencies, dependencies, processed, function()
+				process_tree_file(index + 1)
 			end)
-		end)
-	end
+		end
 
-	process_module(1)
+		process_tree_file(1)
+	end)
 end
 
 local follow_internal = function()
