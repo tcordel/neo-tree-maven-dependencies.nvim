@@ -48,6 +48,19 @@ M.name = function(config, node, state)
 	if node:get_depth() == 1 then
 		highlight = highlights.ROOT_NAME
 	end
+
+	if node.extra and (node.extra.module or node.extra.scope) then
+		local segments = {}
+		if node.extra.module then
+			table.insert(segments, { text = node.extra.module .. " ", highlight = "NeoTreeMavenModuleLabel" })
+		end
+		if node.extra.scope then
+			table.insert(segments, { text = node.extra.scope .. " ", highlight = "NeoTreeMavenScopeLabel" })
+		end
+		table.insert(segments, { text = node.name, highlight = highlight })
+		return segments
+	end
+
 	return {
 		text = node.name,
 		highlight = highlight,

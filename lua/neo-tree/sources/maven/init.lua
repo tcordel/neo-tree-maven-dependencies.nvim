@@ -377,6 +377,9 @@ M.setup = function(opts)
 
 	ensure_config()
 
+	vim.api.nvim_set_hl(0, "NeoTreeMavenModuleLabel", { link = "@label", default = true })
+	vim.api.nvim_set_hl(0, "NeoTreeMavenScopeLabel", { link = "@keyword", default = true })
+
 	local group = vim.api.nvim_create_augroup("maven", {})
 	vim.api.nvim_create_autocmd("BufReadCmd", {
 		group = group,
