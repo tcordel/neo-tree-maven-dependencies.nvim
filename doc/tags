@@ -1,0 +1,11 @@
+:MavenDependenciesInvalidate	neo-tree-maven-dependencies.txt	/*:MavenDependenciesInvalidate*
+neo-tree-maven-commands	neo-tree-maven-dependencies.txt	/*neo-tree-maven-commands*
+neo-tree-maven-configuration	neo-tree-maven-dependencies.txt	/*neo-tree-maven-configuration*
+neo-tree-maven-dependencies	neo-tree-maven-dependencies.txt	/*neo-tree-maven-dependencies*
+neo-tree-maven-dependencies.txt	neo-tree-maven-dependencies.txt	/*neo-tree-maven-dependencies.txt*
+neo-tree-maven-installation	neo-tree-maven-dependencies.txt	/*neo-tree-maven-installation*
+neo-tree-maven-intro	neo-tree-maven-dependencies.txt	/*neo-tree-maven-intro*
+neo-tree-maven-jar_cmd	neo-tree-maven-dependencies.txt	/*neo-tree-maven-jar_cmd*
+neo-tree-maven-mvn_cmd	neo-tree-maven-dependencies.txt	/*neo-tree-maven-mvn_cmd*
+neo-tree-maven-requirements	neo-tree-maven-dependencies.txt	/*neo-tree-maven-requirements*
+neo-tree-maven-usage	neo-tree-maven-dependencies.txt	/*neo-tree-maven-usage*

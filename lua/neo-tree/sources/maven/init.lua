@@ -145,6 +145,47 @@ M._system_async = function(cmd, opts, callback)
 	end)
 end
 
+local is_windows = function()
+	return vim.fn.has("win32") == 1
+end
+
+--- Resolves the maven executable: an explicit `mvn_cmd` opt wins, otherwise a
+--- wrapper script (mvnw / mvnw.cmd) in the project root is preferred over a
+--- bare "mvn" resolved from PATH.
+local resolve_mvn_cmd = function(root_dir, opts)
+	if opts and opts.mvn_cmd then
+		return opts.mvn_cmd
+	end
+	local wrapper_name = is_windows() and "mvnw.cmd" or "mvnw"
+	local wrapper_path = root_dir .. "/" .. wrapper_name
+	if vim.fn.filereadable(wrapper_path) == 1 then
+		return wrapper_path
+	end
+	return "mvn"
+end
+
+--- Resolves the `jar` executable: an explicit `jar_cmd` opt wins, otherwise
+--- prefer $JAVA_HOME/bin/jar (matches the JDK actually driving mvn/jdtls)
+--- over a bare "jar" resolved from PATH.
+local resolve_jar_cmd = function(opts)
+	if opts and opts.jar_cmd then
+		return opts.jar_cmd
+	end
+	local java_home = os.getenv("JAVA_HOME")
+	if java_home then
+		local bin_name = is_windows() and "jar.exe" or "jar"
+		local jar_path = java_home .. "/bin/" .. bin_name
+		if vim.fn.executable(jar_path) == 1 then
+			return jar_path
+		end
+	end
+	return "jar"
+end
+
+local home_dir = function()
+	return (vim.uv or vim.loop).os_homedir() or os.getenv("HOME") or os.getenv("USERPROFILE")
+end
+
 local register = function(state, callback)
 	if M.config.enabled == false then
 		callback({})
@@ -186,10 +227,14 @@ local open_jar_resource = function(jar_resource)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Loading..." })
 	vim.bo[buf].modifiable = false
 
-	M._system_async({ "sh", "-c", "unzip -p " .. vim.fn.shellescape(jar) .. " " .. vim.fn.shellescape(resource) }, {
+	local extract_dir = vim.fn.tempname()
+	vim.fn.mkdir(extract_dir, "p")
+	M._system_async({ M.config.jar_cmd, "xf", vim.fn.fnamemodify(jar, ":p"), resource }, {
 		text = true,
+		cwd = extract_dir,
 	}, function(result)
 		if not vim.api.nvim_buf_is_valid(buf) then
+			vim.fn.delete(extract_dir, "rf")
 			return
 		end
 		vim.bo[buf].modifiable = true
@@ -197,92 +242,24 @@ local open_jar_resource = function(jar_resource)
 			local lines = vim.split("Failed to extract " .. resource .. " from " .. jar .. ":\n" .. (result.stderr or ""), "\n")
 			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 			vim.bo[buf].modifiable = false
+			vim.fn.delete(extract_dir, "rf")
 			return
 		end
 
-		local content = result.stdout or ""
-		local normalized = string.gsub(content, "\r\n", "\n")
-		local source_lines = vim.split(normalized, "\n", { plain = true })
+		local source_lines = vim.fn.readfile(extract_dir .. "/" .. resource)
+		vim.fn.delete(extract_dir, "rf")
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, source_lines)
 		vim.bo[buf].modifiable = false
 		vim.bo[buf].readonly = true
 	end)
 end
 
--- Resolve a class by name via jdtls's own `workspace/symbol` request instead
--- of hand-building a jdt:// URI: the server returns the real URI for every
--- matching symbol (including library classes), so we only need to filter
--- and open it.
-M.open_class_by_symbol = function()
-	local client = vim.lsp.get_clients({ name = "jdtls" })[1]
-	if not client then
-		vim.notify("No active jdtls client", vim.log.levels.ERROR)
-		return
-	end
-
-	vim.ui.input({ prompt = "Java class name: " }, function(query)
-		if query == nil or query == "" then
-			return
-		end
-
-		client:request("workspace/symbol", { query = query }, function(err, result)
-			if err then
-				vim.notify("workspace/symbol failed: " .. vim.inspect(err), vim.log.levels.ERROR)
-				return
-			end
-			if not result or #result == 0 then
-				vim.notify("No symbol found for " .. query, vim.log.levels.WARN)
-				return
-			end
-
-			local candidates = {}
-			for _, symbol in ipairs(result) do
-				local uri = symbol.location and symbol.location.uri
-				if uri and vim.startswith(uri, "jdt://") then
-					table.insert(candidates, symbol)
-				end
-			end
-			if #candidates == 0 then
-				vim.notify("No library class found for " .. query, vim.log.levels.WARN)
-				return
-			end
-
-			local function open(symbol)
-				open_jdt_uri(symbol.location.uri)
-			end
-
-			if #candidates == 1 then
-				open(candidates[1])
-				return
-			end
-
-			vim.ui.select(candidates, {
-				prompt = "Multiple matches for " .. query .. ", pick one:",
-				format_item = function(symbol)
-					local uri = symbol.location.uri
-					return string.format(
-						"%s (%s:%s:%s)",
-						symbol.containerName or symbol.name,
-						extract_maven_field(uri, "groupId") or "?",
-						extract_maven_field(uri, "artifactId") or "?",
-						extract_maven_field(uri, "version") or "?"
-					)
-				end,
-			}, function(choice)
-				if choice then
-					open(choice)
-				end
-			end)
-		end)
-	end)
-end
-
 -- Resolves a "mvnclass://groupId/artifactId/version/package/Class.class"
 -- locator to a real jdt:// URI via `workspace/symbol`, then hands off to
--- jdtls entirely by re-editing that URI. Unlike `M.open_class_by_symbol`,
--- the maven coordinate + package/class are already known exactly (they
--- came from our own dependency tree), so the match must be exact and
--- unambiguous, not a user-facing pick list.
+-- jdtls entirely by re-editing that URI. The maven coordinate +
+-- package/class are already known exactly (they came from our own
+-- dependency tree), so the match must be exact and unambiguous, not a
+-- user-facing pick list.
 local show_buf_error = function(buf, message)
 	if not vim.api.nvim_buf_is_valid(buf) then
 		return
@@ -364,7 +341,9 @@ local ensure_config = function()
 		root_dir = root_dir,
 		project_name = project_name,
 		maven_dependencies = vim.fn.stdpath("cache") .. "/maven/" .. project_name .. "_dependencies.json",
-		m2_repository = os.getenv("HOME") .. "/.m2/repository/",
+		m2_repository = home_dir() .. "/.m2/repository/",
+		mvn_cmd = resolve_mvn_cmd(root_dir, M._user_opts),
+		jar_cmd = resolve_jar_cmd(M._user_opts),
 	}
 	if not M._invalidate_cmd_created then
 		M._invalidate_cmd_created = true
@@ -386,7 +365,8 @@ local ensure_config = function()
 	end
 end
 
-M.setup = function()
+M.setup = function(opts)
+	M._user_opts = opts or {}
 	M.config = {
 		enabled = false,
 	}
@@ -394,8 +374,6 @@ M.setup = function()
 		vim.notify("neo-tree-maven-dependencies requires Neovim >= 0.10 (uses vim.system)", vim.log.levels.ERROR)
 		return
 	end
-
-	vim.api.nvim_create_user_command("MavenOpenClass", M.open_class_by_symbol, {})
 
 	ensure_config()
 
@@ -477,7 +455,7 @@ end
 
 M.init_project_modules = function(callback)
 	M._system_async({
-		"mvn",
+		M.config.mvn_cmd,
 		"-Dexec.executable=echo",
 		"-Dexec.args=${project.groupId}:${project.artifactId}:${project.version}",
 		"org.codehaus.mojo:exec-maven-plugin:1.6.0:exec",
@@ -622,11 +600,7 @@ local render_node = function(module_artifact_id, group_id, artifact_id, version,
 
 	local jar = jar_prefix .. ".jar"
 
-	local cmd = "unzip -l "
-		.. vim.fn.shellescape(jar)
-		.. ' | tail -n +4 | head -n -2 | awk \'{for (i=4; i<=NF; i++) { printf("%s%s",( (i>4) ? " " : "" ), $i) } print ""}\' | sort'
-
-	M._system_async({ "sh", "-c", cmd }, { text = true }, function(result)
+	M._system_async({ M.config.jar_cmd, "tf", jar }, { text = true }, function(result)
 		if result.code ~= 0 then
 			vim.notify(
 				string.format("Failed to list jar %s (exit %d): %s", jar, result.code, result.stderr or ""),
@@ -635,6 +609,8 @@ local render_node = function(module_artifact_id, group_id, artifact_id, version,
 			callback(nil)
 			return
 		end
+		local entries = vim.split(result.stdout or "", "\n")
+		table.sort(entries)
 		local ok, dependency = pcall(
 			build_dependency_tree,
 			module_artifact_id,
@@ -643,7 +619,7 @@ local render_node = function(module_artifact_id, group_id, artifact_id, version,
 			version,
 			scope,
 			jar,
-			result.stdout or ""
+			table.concat(entries, "\n")
 		)
 		if not ok then
 			vim.notify("Failed to build dependency tree for " .. jar .. ": " .. tostring(dependency), vim.log.levels.WARN)
@@ -724,7 +700,7 @@ M.fetch_dependencies = function(callback)
 
 		local temp_file_name = os.tmpname()
 		M._system_async({
-			"mvn",
+			M.config.mvn_cmd,
 			"dependency:3.9.0:tree",
 			"-DoutputType=json",
 			"-pl",

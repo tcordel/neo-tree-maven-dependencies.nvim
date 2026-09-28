@@ -1,0 +1,115 @@
+*neo-tree-maven-dependencies.txt*   Maven dependency source for neo-tree.nvim
+
+==============================================================================
+CONTENTS                                    *neo-tree-maven-dependencies*
+
+    1. Introduction .................. |neo-tree-maven-intro|
+    2. Requirements ................... |neo-tree-maven-requirements|
+    3. Installation ................... |neo-tree-maven-installation|
+    4. Configuration .................. |neo-tree-maven-configuration|
+    5. Commands ........................ |neo-tree-maven-commands|
+    6. Usage ........................... |neo-tree-maven-usage|
+
+==============================================================================
+1. INTRODUCTION                                    *neo-tree-maven-intro*
+
+A Maven dependency source for neo-tree.nvim, meant to complement
+nvim-jdtls: browse resolved dependency jars, drill into their decompiled
+classes (opened via jdtls's `workspace/symbol` request), or read a jar's
+non-class resources (e.g. spring.factories, SPI files) directly.
+
+==============================================================================
+2. REQUIREMENTS                              *neo-tree-maven-requirements*
+
+- Neovim >= 0.10 (uses |vim.system()| for non-blocking dependency loading)
+- `mvn` on $PATH, or a `mvnw`/`mvnw.cmd` wrapper script at the project root
+- `jar` on $PATH, or a JDK reachable via $JAVA_HOME (ships with any JDK —
+  already required to run `mvn`/jdtls)
+- optionally nvim-notify, for an in-place progress notification while
+  dependencies load
+
+No other OS-specific tool (shell, unzip, awk...) is required. The plugin
+works on Linux, macOS and Windows.
+
+==============================================================================
+3. INSTALLATION                              *neo-tree-maven-installation*
+
+Using lazy.nvim: >lua
+    return {
+        "nvim-neo-tree/neo-tree.nvim",
+        dependencies = {
+            "nvim-lua/plenary.nvim",
+            "tcordel/neo-tree-maven-dependencies.nvim",
+        },
+        opts = function(_, opts)
+            table.insert(opts.sources, "maven")
+            opts.maven = {
+                window = {
+                    mappings = {
+                        ["I"] = "invalidate",
+                    },
+                },
+                group_dirs_and_files = true,
+                group_empty_dirs = true,
+                renderers = {
+                    directory = {
+                        { "indent" },
+                        { "icon" },
+                        { "name" },
+                    },
+                    file = {
+                        { "indent" },
+                        { "icon" },
+                        { "name" },
+                    },
+                },
+            }
+        end,
+    }
+<
+==============================================================================
+4. CONFIGURATION                            *neo-tree-maven-configuration*
+
+The `opts.maven` table (passed through to this source's `setup()`) accepts
+all standard neo-tree source options (window, renderers, ...) plus:
+
+                                                        *neo-tree-maven-mvn_cmd*
+mvn_cmd     (string, default: auto-detected)
+            The maven executable to invoke. When unset, resolved per
+            project as:
+              1. `./mvnw` (or `./mvnw.cmd` on Windows) at the project root,
+                 if present and readable.
+              2. otherwise `mvn`, resolved from $PATH.
+
+                                                        *neo-tree-maven-jar_cmd*
+jar_cmd     (string, default: auto-detected)
+            The `jar` executable used to list/extract jar contents. When
+            unset, resolved as:
+              1. `$JAVA_HOME/bin/jar` (`.exe` suffix on Windows), if
+                 $JAVA_HOME is set and the binary is executable.
+              2. otherwise `jar`, resolved from $PATH.
+
+Example, pinning both explicitly: >lua
+    opts.maven = {
+        mvn_cmd = "/opt/maven/bin/mvn",
+        jar_cmd = "/opt/jdk-21/bin/jar",
+    }
+<
+==============================================================================
+5. COMMANDS                                        *neo-tree-maven-commands*
+
+                                                *:MavenDependenciesInvalidate*
+:MavenDependenciesInvalidate
+            Reload the dependency cache.
+
+==============================================================================
+6. USAGE                                              *neo-tree-maven-usage*
+
+>vim
+    :Neotree maven
+<
+Opens the dependency list. A dependency analysis runs on first open, and is
+cached (see |neo-tree-maven-configuration|). Press `I` in the list (or run
+|:MavenDependenciesInvalidate|) to force a reload.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

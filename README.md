@@ -12,18 +12,33 @@ But in some cases, i needed to scrub into a jar content to get more details abou
 ## Commands
 
 * `:MavenDependenciesInvalidate` — reload the dependency cache.
-* `:MavenOpenClass` — prompt for a Java class name, resolve it via jdtls's `workspace/symbol` request, and open the matching decompiled class directly (no need to browse the tree). If several jars provide a class with that name, pick one from a list showing `groupId:artifactId:version`.
 
 ## Installation
-
-> **_NOTE_** Actually, this plugin is working only on linux
 
 Requires Neovim >= 0.10 (uses `vim.system` for non-blocking dependency loading).
 
 Required dependencies:
-* `mvn`
-* `unzip`
+* `mvn` (or a `mvnw`/`mvnw.cmd` wrapper at the project root, auto-detected)
+* `jar` (ships with any JDK — already required to run `mvn`/jdtls)
 * optionally [nvim-notify](https://github.com/rcarriga/nvim-notify) for an in-place progress notification while dependencies load
+
+No other OS-specific tool (`sh`, `unzip`, `awk`...) is required; the plugin works on Linux, macOS and Windows.
+
+### Overriding the resolved commands
+
+By default:
+* `mvn_cmd` resolves to `./mvnw` (or `./mvnw.cmd` on Windows) if present at the project root, else falls back to `mvn` on `$PATH`.
+* `jar_cmd` resolves to `$JAVA_HOME/bin/jar` if `$JAVA_HOME` is set and executable, else falls back to `jar` on `$PATH`.
+
+Both can be overridden explicitly:
+
+```lua
+opts.maven = {
+	mvn_cmd = "/opt/maven/bin/mvn",
+	jar_cmd = "/opt/jdk-21/bin/jar",
+	-- ...
+}
+```
 
 > Using Lazy:
 ```lua
