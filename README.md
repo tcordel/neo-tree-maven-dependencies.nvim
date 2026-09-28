@@ -13,9 +13,12 @@ But in some cases, i needed to scrub into a jar content to get more details abou
 
 > **_NOTE_** Actually, this plugin is working only on linux
 
+Requires Neovim >= 0.10 (uses `vim.system` for non-blocking dependency loading).
+
 Required dependencies:
 * `mvn`
 * `unzip`
+* optionally [nvim-notify](https://github.com/rcarriga/nvim-notify) for an in-place progress notification while dependencies load
 
 > Using Lazy:
 ```lua
